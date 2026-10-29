@@ -39,10 +39,12 @@ def image_count(source, root):
 
 
 class DataConfiguration(ProjectPage):
-    def __init__(self, changed, back, save, imported=None):
+    def __init__(self, changed, back, save, imported=None, package_request=None):
         super().__init__('数据配置', back, '保存并检查', save)
         self.changed = changed
         self.imported = imported
+        self.package_request = package_request
+        self._package_label = None
         self._loading = False
         self._model = dict(areas=[], periods=[], truths=[], area_irmad_references={})
         self._issues = []
@@ -90,6 +92,10 @@ class DataConfiguration(ProjectPage):
         self.add_folder_button.clicked.connect(self._import_folder)
         self.delete_period_button.clicked.connect(self._ask_delete_period)
         form.addRow(ImportActions(self.add_period_button, self.add_folder_button, self.delete_period_button))
+        self.package_button = QPushButton('导入数据包')
+        self.package_button.setToolTip('识别年度整幅影像或按期次、层级组织的切图；每个数据包导入一个区域')
+        self.package_button.clicked.connect(self._import_package)
+        form.addRow(inline(self.package_button, note(), stretch_first=False))
         self.period_editor = QWidget()
         editor = form_layout(self.period_editor)
         editor.setContentsMargins(0, 8, 0, 8)
@@ -149,10 +155,11 @@ class DataConfiguration(ProjectPage):
     def load(self, model):
         self._model = copy.deepcopy(model)
         self._model.setdefault('area_irmad_references', {})
+        self._model.setdefault('input_packages', [])
         self._reload_areas(self.area.currentText())
 
     def inputs(self):
-        return {key: copy.deepcopy(self._model[key]) for key in ('areas', 'periods', 'truths', 'area_irmad_references')}
+        return {key: copy.deepcopy(self._model[key]) for key in ('areas', 'periods', 'truths', 'area_irmad_references', 'input_packages')}
 
     def _reload_areas(self, selected=''):
         self.area.blockSignals(True)
@@ -266,6 +273,9 @@ class DataConfiguration(ProjectPage):
                     row[0] = name
         refs = self._model['area_irmad_references']
         refs[name] = refs.pop(old, '')
+        for record in self._model['input_packages']:
+            if record['area'] == old:
+                record['area'] = name
         self._reload_areas(name)
         self.changed()
         return True
@@ -282,6 +292,7 @@ class DataConfiguration(ProjectPage):
         for key in ('areas', 'periods', 'truths'):
             self._model[key] = [r for r in self._model[key] if r[0] != area]
         self._model['area_irmad_references'].pop(area, None)
+        self._model['input_packages'] = [r for r in self._model['input_packages'] if r['area'] != area]
         self._reload_areas()
         self.changed()
 
@@ -320,10 +331,34 @@ class DataConfiguration(ProjectPage):
         if not self.area.currentText():
             return
         drafts, notices = import_periods(paths)
+        self._begin_drafts(drafts, notices)
+
+    def _import_package(self):
+        directory = QFileDialog.getExistingDirectory(self, '选择单个区域的数据包根目录')
+        if directory and self.package_request:
+            self.package_request(dict(action='scan', directory=directory), self._package_scanned)
+
+    def _package_scanned(self, result):
+        variants = result['variants']
+        labels = [f"{v['label']}（{len(v['drafts'])} 期，{sum(r['count'] for r in v['drafts'])} 幅）" for v in variants]
+        chosen, ok = QInputDialog.getItem(self, '选择数据版本', '每期使用一种版本和层级', labels, 0, False)
+        if not ok:
+            return
+        variant = variants[labels.index(chosen)]
+        self._begin_drafts(variant['drafts'], variant['notices'])
+        self._package_label = variant['label']
+        generate = self.import_confirmation.generate_boundary
+        generate.setChecked(not bool(self.boundary.text().strip()))
+        generate.show()
+
+    def _begin_drafts(self, drafts, notices):
         if not drafts:
             self.show_issues(notices or ['未找到支持的影像或 TXT 清单（仅扫描所选目录及一级子目录）'])
             return
         self._cancel_period()
+        self._package_label = None
+        self.import_confirmation.generate_boundary.hide()
+        self.import_confirmation.generate_boundary.setChecked(False)
         area = self.area.currentText()
         self.import_confirmation.heading.setText(f'添加影像期次 · {area}')
         self.import_confirmation.load(drafts, [p for a, p, _ in self._model['periods'] if a == area], notices)
@@ -336,6 +371,8 @@ class DataConfiguration(ProjectPage):
         self.scroll.ensureWidgetVisible(self.import_confirmation)
 
     def _cancel_import(self):
+        self._package_label = None
+        self.import_confirmation.generate_boundary.hide()
         self.import_confirmation.hide()
         self.periods.show()
         self.periods_label.show()
@@ -350,7 +387,28 @@ class DataConfiguration(ProjectPage):
         if panel.isHidden() or not panel.validate():
             return
         area = self.area.currentText()
-        rows = [[area, row['name'], row['source']] for row in panel.values()]
+        values = panel.values()
+        if self._package_label and panel.generate_boundary.isChecked():
+            if not self.package_request:
+                return
+            existing = [dict(name=p, source=str(resolve(s, Path(self._model['root']))) if '\n' not in s else s)
+                        for a, p, s in self._model['periods'] if a == area]
+            self.package_request(dict(action='materialize', root=self._model['root'], rows=existing + values),
+                                 lambda result: self._commit_import(values, result['boundary']))
+            return
+        self._commit_import(values)
+
+    def _commit_import(self, values, boundary=None):
+        area = self.area.currentText()
+        if boundary:
+            for row in self._model['areas']:
+                if row[0] == area:
+                    row[1] = boundary
+        if self._package_label:
+            self._model.setdefault('input_packages', []).append(dict(
+                area=area, version=self._package_label, periods=[r['name'] for r in values],
+                generated_boundary=bool(boundary)))
+        rows = [[area, row['name'], row['source']] for row in values]
         self._model['periods'].extend(rows)
         self._prune_truths()
         self._show_area()
@@ -369,7 +427,7 @@ class DataConfiguration(ProjectPage):
     def _other_inputs(self):
         return (self.area, self.add_area_button, self.rename_area_button, self.delete_area_button,
                 self.boundary, self.reference, self.periods, self.truths, self.add_period_button,
-                self.add_folder_button, self.delete_period_button)
+                self.add_folder_button, self.delete_period_button, self.package_button)
 
     def _source_caption(self):
         self.source_summary.setText(image_count(self._source, Path(self._model.get('root', '.'))))

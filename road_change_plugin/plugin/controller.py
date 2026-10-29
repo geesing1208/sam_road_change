@@ -289,6 +289,20 @@ class Controller(TaskSignals):
         missing = self.runner.missing_runtime()
         return "缺少运行资源：\n" + "\n".join(missing) if missing else "运行资源已就绪"
 
+    def input_package(self, request):
+        """Package I/O stays in the backend interpreter; caller runs off the UI thread."""
+        import subprocess
+        environment = self.runner.environment()
+        process = subprocess.run(
+            [str(self.runner.python_path()), str(ROOT / 'code/app/input_packages.py')],
+            input=json.dumps(request, ensure_ascii=False),
+            env={key: environment.value(key) for key in environment.keys()},
+            capture_output=True, text=True, encoding='utf-8', errors='replace',
+            timeout=600, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        if process.returncode:
+            raise ValueError((process.stderr or process.stdout)[-2500:])
+        return json.loads(process.stdout)
+
     def inspect_data(self, data):
         """Read-only GIS inspection in the independent backend interpreter."""
         import subprocess

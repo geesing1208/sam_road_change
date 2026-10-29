@@ -25,6 +25,10 @@ def identify(*levels):
         found = set().union(*(dates(value) for value in values))
         if found:
             return (next(iter(found)), '') if len(found) == 1 else ('', '检测到多个日期，请填写该期名称')
+        years = {m[1] for value in values
+                 if (m := re.match(r'^(19\d{2}|20\d{2})(?:年|[-_]|$)', value))}
+        if years:
+            return (next(iter(years)), '') if len(years) == 1 else ('', '检测到多个年份，请填写该期名称')
     return '', '未识别到日期，请填写期次名称'
 
 

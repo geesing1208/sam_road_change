@@ -31,6 +31,7 @@ from input_catalog import (
     period_sort_key,
     read_path_list,
 )
+from app.input_packages import analysis_crs_for
 from app.result_publisher import (
     LEGACY_RESULT_DIRECTORY_NAME, RESULT_DIRECTORY_NAME,
     ProjectLayout, ResultPublisher, shapefile_has_records,
@@ -1602,9 +1603,9 @@ def normalize_validation_sources(
     """Write every validation input onto one masked, common analysis grid.
 
     The model stages receive only these derived rasters, never the original
-    broad source extents.  The first image CRS is the common analysis CRS:
-    validation vectors are often geographic (degrees), while downstream road
-    widths and matching tolerances require the image's projected map units.
+    broad source extents. Metre-based projected inputs retain their CRS;
+    geographic inputs use a local metre-based projection, so road widths and
+    matching tolerances never operate in degrees.
 
     Processing is deliberately windowed.  A previous implementation allocated
     the complete multi-band mosaic plus one complete warp buffer in RAM.  That
@@ -1638,7 +1639,7 @@ def normalize_validation_sources(
     with rasterio.open(first_raster) as first_dataset:
         if first_dataset.crs is None:
             raise ValueError(f"影像缺少 CRS：{first_raster}")
-        analysis_crs = first_dataset.crs
+        analysis_crs = analysis_crs_for(first_dataset.crs, area)
     analysis_area = area.to_crs(analysis_crs)
     validation_geometry = unary_union(list(analysis_area.geometry))
 
@@ -4373,7 +4374,7 @@ def build_preflight_report(
             first = area_metadata[0]
             if first["crs"] is None:
                 continue
-            analysis_crs = first["crs"]
+            analysis_crs = analysis_crs_for(first["crs"], area)
             analysis_area = area.to_crs(analysis_crs)
             transformed_resolutions = []
             for item in area_metadata:

@@ -293,7 +293,9 @@ class RoadChangeWidget(QWidget):
         self.check_note = label('')
         form.addRow(self.check_note)
         self.configuration = DataConfiguration(self._edited, self._back_to_main, self._save_and_check,
-                                                lambda: self._save_and_check(return_to_main=False))
+                                                lambda: self._save_and_check(return_to_main=False),
+                                                package_request=lambda request, callback: self._background(
+                                                    self.controller.input_package, (request,), callback))
         self.creation = ProjectCreation(self._back_to_main, self._create_project)
         self.check_button = self.configuration.save_button
 

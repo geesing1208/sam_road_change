@@ -53,6 +53,7 @@ def scan_project(directory):
         config = read_object(config_path)
         model["config"] = config
         model["area_irmad_references"]=dict(config.get("area_irmad_references") or {})
+        model['input_packages'] = config.get('input_packages', [])
         old_root = Path(str(config.get("project_root", ".")))
 
         def configured(value):
@@ -180,6 +181,8 @@ def save_configuration(model, settings):
                   area_truths=[[a, b, c, portable(p)] for a, b, c, p in model["truths"]],
                   area_irmad_references=model["area_irmad_references"],
                   plugin_processing_parameters=settings)
+    if 'input_packages' in model:
+        config['input_packages'] = model['input_packages']
     if 'automatic_reference_selections' in model:
         config['automatic_reference_selections'] = model['automatic_reference_selections']
     if 'automatic_reference_selections' in config:

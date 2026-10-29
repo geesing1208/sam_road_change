@@ -2,7 +2,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QBrush
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGridLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QPushButton, QStyledItemDelegate, QSizePolicy)
+    QHeaderView, QAbstractItemView, QPushButton, QStyledItemDelegate, QSizePolicy, QCheckBox)
 from .project_pages import note
 from .presentation import inline
 
@@ -71,6 +71,10 @@ class ImportConfirmation(QWidget):
         self.message = note()
         layout.addWidget(self.detail)
         layout.addWidget(self.message)
+        self.generate_boundary = QCheckBox('生成共同有效范围')
+        self.generate_boundary.setToolTip('排除缺失瓦片及 NoData；确认后保存为项目中的范围 SHP。已有范围不会自动替换。')
+        self.generate_boundary.hide()
+        layout.addWidget(self.generate_boundary)
         self.remove_button = QPushButton('移除所选行')
         self.remove_button.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
         self.remove_button.clicked.connect(self.remove_selected)

@@ -54,6 +54,71 @@ class ImageImportTests(unittest.TestCase):
         self.assertEqual({r['source'] for r in rows}, {str(x), str(y)})
         self.assertFalse(notices)
 
+    def test_annual_files_group_without_inventing_month_or_day(self):
+        rows, _ = import_periods([self.file('20260101/2021年-1.tif'), self.file('2022-1.tif')])
+        self.assertEqual([r['name'] for r in rows], ['2021', '2022'])
+
+    def test_package_confirmation_cancel_and_generated_boundary_are_atomic(self):
+        page = self.panel()
+        drafts, notices = import_periods([self.file('2021.tif'), self.file('2022.tif')])
+        result = dict(variants=[dict(label='切图 · 15 级', drafts=drafts, notices=notices)])
+        with patch('plugin.ui.data_configuration.QInputDialog.getItem', return_value=('切图 · 15 级（2 期，2 幅）', True)):
+            page._package_scanned(result)
+        self.assertFalse(page.import_confirmation.generate_boundary.isChecked())
+
+        self.assertFalse(page.inputs()['periods'])
+        page._cancel_import()
+        self.assertFalse(page.inputs()['periods'])
+        self.assertFalse(page.inputs()['input_packages'])
+        with patch('plugin.ui.data_configuration.QInputDialog.getItem', return_value=('切图 · 15 级（2 期，2 幅）', True)):
+            page._package_scanned(result)
+        page.import_confirmation.generate_boundary.setChecked(True)
+        requests = []
+        page.package_request = lambda request, callback: requests.append((request, callback))
+        page._confirm_import()
+        self.assertFalse(page.inputs()['periods'])
+        self.assertEqual(page.inputs()['areas'][0][1], 'boundary.shp')
+        request, callback = requests.pop()
+        self.assertEqual(request['action'], 'materialize')
+        self.assertEqual(len(request['rows']), 2)
+        callback(dict(boundary=str(self.root / 'common.shp')))
+        self.assertEqual(len(page.inputs()['periods']), 2)
+        self.assertEqual(page.inputs()['areas'][0][1], str(self.root / 'common.shp'))
+        self.assertEqual(page.inputs()['input_packages'][0]['version'], '切图 · 15 级')
+        self.assertFalse(page.has_pending_edit)
+
+    def test_package_confirmation_fits_narrow_panel_and_metadata_survives_save(self):
+        from plugin.ui.project_browser import save_configuration, scan_project
+        page = self.panel()
+        drafts, notices = import_periods([self.file('2021.tif'), self.file('2022.tif')])
+        result = dict(variants=[dict(label='整幅影像', drafts=drafts, notices=notices)])
+        with patch('plugin.ui.data_configuration.QInputDialog.getItem', return_value=('整幅影像（2 期，2 幅）', True)):
+            page._package_scanned(result)
+        page.resize(300, 600)
+        page.show()
+        APP.processEvents()
+        self.assertEqual(page.scroll.horizontalScrollBar().maximum(), 0)
+        self.assertLessEqual(page.minimumSizeHint().width(), 300)
+        page._confirm_import()
+        model = dict(page.inputs(), root=str(self.root), output=str(self.root / '成果输出'))
+        save_configuration(model, {})
+        reopened = scan_project(self.root)
+        self.assertEqual(reopened['input_packages'], model['input_packages'])
+        self.assertEqual([p for _, p, _ in reopened['periods']], ['2021', '2022'])
+
+    def test_package_generates_missing_boundary_by_default_and_preserves_old_entry(self):
+        page = self.panel()
+        page.boundary.edit.clear()
+        drafts, notices = import_periods([self.file('2021.tif'), self.file('2022.tif')])
+        result = dict(variants=[dict(label='整幅影像', drafts=drafts, notices=notices)])
+        with patch('plugin.ui.data_configuration.QInputDialog.getItem', return_value=('整幅影像（2 期，2 幅）', True)):
+            page._package_scanned(result)
+        self.assertTrue(page.import_confirmation.generate_boundary.isChecked())
+        page._cancel_import()
+        page.begin_import([self.file('20230101.tif')])
+        self.assertTrue(page.import_confirmation.generate_boundary.isHidden())
+        self.assertFalse(page.import_confirmation.generate_boundary.isChecked())
+
     def test_txt_filename_then_directory_fallback_and_relative_paths(self):
         self.file('20250118/no-date.tif')
         txt = self.file('20250118/list_2026-02-03.txt', '# comment\n"no-date.tif"\n')
