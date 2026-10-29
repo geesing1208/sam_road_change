@@ -19,6 +19,15 @@ def denied(code=5):
 
 
 class CacheCommitTests(unittest.TestCase):
+    def test_short_attempt_recovery_still_requires_full_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/('a'*64)
+            attempt=cache.new_attempt(root)
+            self.assertLess(len(attempt.name),len(root.name))
+            (attempt/'normalization.json').write_text(json.dumps({'outputs':[]}),encoding='utf8')
+            cache.seal_prepared(attempt,root,{'identity':'full-a'})
+            self.assertEqual(cache.find_prepared(root,{'identity':'full-a'}),attempt)
+            self.assertIsNone(cache.find_prepared(root,{'identity':'full-b'}))
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

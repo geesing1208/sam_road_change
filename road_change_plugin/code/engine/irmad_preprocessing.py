@@ -9,13 +9,12 @@ import hashlib
 import json
 import shutil
 import time
-import uuid
 
 import numpy as np
 import rasterio
 from threadpoolctl import threadpool_limits
 from . import irmad_core as core
-from .cache_commit import find_prepared, seal_prepared, commit_prepared
+from .cache_commit import find_prepared, seal_prepared, commit_prepared, new_attempt
 
 REFERENCE = '20250118'
 VERSION = 'fast_irmad_pif_tls_v2'
@@ -207,13 +206,14 @@ def prepare_period(period,sources,cache_root,*,enabled=False,origin=None,referen
             return PreparedInput(root/'normalized_tiles',dict(base,status='cache_hit',cache_identity=key,audit=str(root/'normalization.json')))
         raise RuntimeError(f'IR-MAD 缓存损坏：{root}；请移走该缓存后重试，禁止回退原图')
     # Independent attempt directories prevent partial writes being mistaken for a hit.
-    attempt=Path(cache_root)/f'{key}.pending-{uuid.uuid4().hex}'
+    attempt=None
     try:
         prepared=find_prepared(root,identity)
         if prepared:
             attempt=prepared
             print(f'[IR-MAD] {period} → {reference_period}: 重试提交已完成缓存',flush=True)
         else:
+            attempt=new_attempt(root)
             print(f'[IR-MAD] {period} → {reference_period}: 独立 PIF / TLS 拟合',flush=True)
             normalize_pair(pairs,attempt,reference_period=reference_period)
             tiles=attempt/'normalized_tiles'
@@ -222,7 +222,7 @@ def prepare_period(period,sources,cache_root,*,enabled=False,origin=None,referen
             seal_prepared(attempt,root,identity)
         commit_prepared(attempt,root,identity)
     except Exception as exc:
-        if attempt.is_dir():
+        if attempt is not None and attempt.is_dir():
             try:save(attempt/'failure.json',dict(error=str(exc),identity=identity))
             except OSError:pass
         raise RuntimeError(f'IR-MAD {period} → {reference_period} 失败：{exc}') from exc

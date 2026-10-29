@@ -42,6 +42,9 @@ class ImageImportTests(unittest.TestCase):
         rows, _ = import_periods([self.file('20250118_to_20260203.tif')])
         self.assertEqual(rows[0]['name'], '')
         self.assertIn('多个日期', rows[0]['reason'])
+        rows, _ = import_periods([self.file('2026-02-30.tif')])
+        self.assertEqual(rows[0]['name'], '')
+        self.assertIn('日期无效', rows[0]['reason'])
 
     def test_multiple_txts_each_create_one_period_with_filename_priority(self):
         a = self.file('first/A_20250118.tif')

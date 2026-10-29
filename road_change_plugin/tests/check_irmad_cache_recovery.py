@@ -53,7 +53,7 @@ class RecoveryTests(unittest.TestCase):
             return save(path, value)
         # Make an attempt directory before failing, as a real normalization would.
         def normalize(pairs, attempt, **kwargs):
-            attempt.mkdir(parents=True)
+            attempt.mkdir(parents=True, exist_ok=True)
             raise RuntimeError('original failure')
         with patch.object(rrn, 'normalize_pair', normalize), patch.object(rrn, 'save', fail_diagnostic):
             with self.assertRaisesRegex(RuntimeError, 'original failure'):

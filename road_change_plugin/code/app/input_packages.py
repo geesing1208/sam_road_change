@@ -12,13 +12,15 @@ from datetime import date
 
 def period_name(text):
     dates = set()
-    for match in re.finditer(r'(?<!\d)(\d{4})[-_]?(\d{2})[-_]?(\d{2})(?!\d)', text):
+    invalid = False
+    matches = list(re.finditer(r'(?<!\d)(\d{4})[-_]?(\d{2})[-_]?(\d{2})(?!\d)', text))
+    for match in matches:
         try:
             dates.add(date(*map(int, match.groups())).strftime('%Y%m%d'))
         except ValueError:
-            pass
-    if dates:
-        return next(iter(dates)) if len(dates) == 1 else ''
+            invalid = True
+    if matches:
+        return next(iter(dates)) if len(dates) == 1 and not invalid else ''
     # Years must be a leading calendar label, never a satellite product version.
     match = re.match(r'^(19\d{2}|20\d{2})(?:年|[-_]|$)', text)
     return match[1] if match else ''
@@ -144,8 +146,14 @@ def _variant(label, groups):
     drafts, notices, tile_ids, footprints = [], [], {}, []
     for period, files in sorted(groups.items()):
         boxes, identities = [], set()
+        products = {re.sub(r'_\d+_\d+$', '', p.stem) for p in files
+                    if re.search(r'_\d+_\d+$', p.stem)}
+        if len(products) > 1:
+            raise ValueError(f'{period} 包含多个切图产品：' + '、'.join(sorted(products)) + '；请分别导入')
         for path in files:
             file_period = period_name(path.stem)
+            if not file_period and re.search(r'(?<!\d)\d{4}[-_]?\d{2}[-_]?\d{2}(?!\d)', path.stem):
+                raise ValueError(f'影像日期无效或不唯一：{path.name}')
             if file_period and file_period != period:
                 raise ValueError(f'目录期次 {period} 与文件日期 {file_period} 不一致：{path.name}')
             with rasterio.open(path) as ds:
@@ -196,6 +204,27 @@ def _source_files(source):
     return paths
 
 
+class _CoverageUnion:
+    """Balanced unions: do not repeatedly union each tile into an ever larger polygon."""
+    def __init__(self):
+        self.levels = []
+
+    def add(self, geometry):
+        level = 0
+        while level < len(self.levels) and self.levels[level] is not None:
+            geometry = self.levels[level].union(geometry)
+            self.levels[level] = None
+            level += 1
+        if level == len(self.levels):
+            self.levels.append(geometry)
+        else:
+            self.levels[level] = geometry
+
+    def geometry(self):
+        from shapely.ops import unary_union
+        return unary_union([g for g in self.levels if g is not None])
+
+
 def materialize(root, rows):
     """Persist an immutable common valid-data polygon, using bounded mask reads."""
     import geopandas as gpd
@@ -205,18 +234,26 @@ def materialize(root, rows):
     from shapely.geometry import shape
     from shapely.ops import unary_union, transform
     from pyproj import Transformer
+    from engine.raster_memory import check_native_blocks
+    import tempfile
+    import os
     if not rows:
         raise ValueError('请至少选择一个期次')
     common, identities = None, []
     for row in rows:
-        coverage = None
+        accumulator = _CoverageUnion()
+        transforms = {}
         for path in _source_files(row['source']):
             stat = path.stat()
             identities.append([str(path), stat.st_size, stat.st_mtime_ns])
             with rasterio.open(path) as ds:
+                check_native_blocks(ds)
                 if ds.crs is None:
                     raise ValueError(f'影像缺少坐标信息：{path}')
-                project = Transformer.from_crs(ds.crs, 4326, always_xy=True).transform
+                key = ds.crs.to_wkt()
+                if key not in transforms:
+                    transforms[key] = Transformer.from_crs(ds.crs, 4326, always_xy=True).transform
+                project = transforms[key]
                 for y in range(0, ds.height, 512):
                     for x in range(0, ds.width, 512):
                         window = Window(x, y, min(512, ds.width-x), min(512, ds.height-y))
@@ -224,8 +261,9 @@ def materialize(root, rows):
                         pieces = [shape(g) for g, _ in shapes(valid.astype('uint8'), mask=valid, transform=ds.window_transform(window))]
                         if pieces:
                             polygon = transform(project, unary_union(pieces))
-                            coverage = polygon if coverage is None else coverage.union(polygon)
-        if coverage is None:
+                            accumulator.add(polygon)
+        coverage = accumulator.geometry()
+        if coverage.is_empty:
             raise ValueError(f"{row['name']} 没有有效影像像元")
         common = coverage if common is None else common.intersection(coverage)
     if common is None or common.is_empty or common.area == 0:
@@ -234,13 +272,33 @@ def materialize(root, rows):
         common = unary_union([g for g in common.geoms if g.geom_type in {'Polygon', 'MultiPolygon'}])
     if common.is_empty:
         raise ValueError('共同覆盖没有有效面范围')
-    digest = hashlib.sha256(common.wkb + json.dumps(identities, sort_keys=True).encode()).hexdigest()[:24]
+    digest = hashlib.sha256(b'coverage_v2' + common.wkb + json.dumps(identities, sort_keys=True).encode()).hexdigest()[:24]
     directory = Path(root).resolve() / '01_验证区' / '_imported' / digest
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / 'common.shp'
-    if not all(target.with_suffix(ext).is_file() for ext in ('.shp', '.shx', '.dbf', '.prj')):
+    marker = directory / 'complete.json'
+    intact = False
+    if marker.is_file():
+        try:
+            expected = json.loads(marker.read_text(encoding='utf-8'))
+            intact = isinstance(expected, dict) and all(target.with_suffix(ext).is_file() and
+                         hashlib.sha256(target.with_suffix(ext).read_bytes()).hexdigest() == digest
+                         for ext, digest in expected.items()) and all(ext in expected for ext in ('.shp','.shx','.dbf','.prj'))
+        except (OSError, ValueError):
+            pass
+    if not intact:
         frame = gpd.GeoDataFrame({'name': ['common']}, geometry=[common], crs=4326)
-        frame.to_crs(analysis_crs_for(4326, frame)).to_file(target, engine='pyogrio', encoding='UTF-8')
+        with tempfile.TemporaryDirectory(prefix='.coverage-', dir=directory.parent) as temporary:
+            staged = Path(temporary) / 'common.shp'
+            frame.to_crs(analysis_crs_for(4326, frame)).to_file(staged, engine='pyogrio', encoding='UTF-8')
+            checksums = {}
+            for ext in ('.shp','.shx','.dbf','.prj','.cpg'):
+                file = staged.with_suffix(ext)
+                checksums[ext] = hashlib.sha256(file.read_bytes()).hexdigest()
+                os.replace(file, target.with_suffix(ext))
+            pending = Path(temporary) / 'complete.json'
+            pending.write_text(json.dumps(checksums), encoding='utf-8')
+            os.replace(pending, marker)
     return dict(boundary=str(target), notice='已按各期共同有效覆盖生成范围；缺失瓦片和 NoData 区域不纳入该范围。')
 
 

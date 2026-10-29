@@ -294,10 +294,10 @@ class RoadChangeWidget(QWidget):
         form.addRow(self.check_note)
         self.configuration = DataConfiguration(self._edited, self._back_to_main, self._save_and_check,
                                                 lambda: self._save_and_check(return_to_main=False),
-                                                package_request=lambda request, callback: self._background(
-                                                    self.controller.input_package, (request,), callback))
+                                                package_request=self._request_package)
         self.creation = ProjectCreation(self._back_to_main, self._create_project)
         self.check_button = self.configuration.save_button
+        self.configuration.cancel_package_button.clicked.connect(self._cancel_package)
 
     def _show_creation(self):
         if self.busy or self.browsing:
@@ -580,6 +580,15 @@ class RoadChangeWidget(QWidget):
         self._invalidate_check()
         self._show_problems(["数据配置已修改，请保存并检查"])
 
+    def _request_package(self, request, callback):
+        from threading import Event
+        self._package_cancel = Event()
+        self._background(self.controller.input_package, (request, self._package_cancel), callback)
+
+    def _cancel_package(self):
+        if getattr(self, '_package_cancel', None) is not None:
+            self._package_cancel.set()
+
     def _background(self, function, args, callback):
         self.browsing = True
         job = BrowseJob(function, *args)
@@ -592,6 +601,7 @@ class RoadChangeWidget(QWidget):
             if self._job is not job:
                 return
             self.browsing = False
+            self._package_cancel = None
             if revision == self._project_revision:
                 if error is None:
                     callback(value)
@@ -784,6 +794,9 @@ class RoadChangeWidget(QWidget):
         self.creation.body.setEnabled(available)
         self.creation.save_button.setEnabled(available)
         self.configuration.body.setEnabled(available)
+        package_busy = self.browsing and getattr(self, '_package_cancel', None) is not None
+        self.configuration.cancel_package_button.setVisible(package_busy)
+        self.configuration.back_button.setEnabled(not package_busy)
         self.check_button.setEnabled(available and opened and not self.configuration.has_pending_edit)
         self.configure_button.setEnabled(available and opened)
         self.advanced.setEnabled(available)

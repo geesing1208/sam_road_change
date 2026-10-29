@@ -19,6 +19,7 @@ class Controller(TaskSignals):
         self.review.updated.connect(self._review_updated)
         self.project_state = None
         self._project_lock = None
+        self._package_cancel = None
         self.runner.task_finished.connect(self._completed)
         self.runner.task_failed.connect(self._operation_failed)
         for name in ('task_started', 'task_progress', 'task_log', 'result_ready'):
@@ -278,6 +279,8 @@ class Controller(TaskSignals):
         self.task_log.emit({'level': 'INFO', 'message': '人工复核已应用，正式变化、长时序和可用的精度评价已更新。'})
 
     def shutdown(self):
+        if self._package_cancel is not None:
+            self._package_cancel.set()
         self.review.close()
         self.runner.shutdown()
         self._unlock_project()
@@ -289,19 +292,18 @@ class Controller(TaskSignals):
         missing = self.runner.missing_runtime()
         return "缺少运行资源：\n" + "\n".join(missing) if missing else "运行资源已就绪"
 
-    def input_package(self, request):
+    def input_package(self, request, cancelled=None):
         """Package I/O stays in the backend interpreter; caller runs off the UI thread."""
-        import subprocess
+        from threading import Event
+        from .package_process import run_package_process
         environment = self.runner.environment()
-        process = subprocess.run(
-            [str(self.runner.python_path()), str(ROOT / 'code/app/input_packages.py')],
-            input=json.dumps(request, ensure_ascii=False),
-            env={key: environment.value(key) for key in environment.keys()},
-            capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=600, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        if process.returncode:
-            raise ValueError((process.stderr or process.stdout)[-2500:])
-        return json.loads(process.stdout)
+        self._package_cancel = cancelled if cancelled is not None else Event()
+        try:
+            return run_package_process(
+                [str(self.runner.python_path()), str(ROOT / 'code/app/input_packages.py')], request,
+                {key: environment.value(key) for key in environment.keys()}, self._package_cancel)
+        finally:
+            self._package_cancel = None
 
     def inspect_data(self, data):
         """Read-only GIS inspection in the independent backend interpreter."""

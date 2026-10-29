@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'code'))
@@ -122,6 +123,68 @@ class PackageTests(unittest.TestCase):
         self.raster('包/20260214-GF6/15/image_20260604_1_1.tif')
         with self.assertRaisesRegex(ValueError, '不一致'):
             discover(self.root / '包')
+
+    def test_invalid_or_ambiguous_dates_do_not_fall_back_to_year(self):
+        for value in ('2026-02-30', '20260101_to_20260201', '20260101_to_20260230'):
+            self.assertEqual(period_name(value),'')
+
+    def test_different_tile_products_not_merged_with_disjoint_ids(self):
+        self.raster('包/20260214/15/GF6_20260214_1_1.tif')
+        self.raster('包/20260214/15/GF1_20260214_1_2.tif')
+        with self.assertRaisesRegex(ValueError,'多个切图产品'):
+            discover(self.root/'包')
+
+    def test_interrupted_boundary_publication_is_rebuilt(self):
+        rows=[dict(name='2021',source=str(self.raster('2021.tif')))]
+        target=Path(materialize(self.root/'project',rows)['boundary'])
+        target.with_suffix('.dbf').write_bytes(b'partial')
+        repaired=materialize(self.root/'project',rows)
+        self.assertEqual(repaired['boundary'],str(target))
+        self.assertEqual(len(gpd.read_file(target)),1)
+        (target.parent/'complete.json').write_text('[]',encoding='utf-8')
+        self.assertEqual(materialize(self.root/'project',rows)['boundary'],str(target))
+        self.assertEqual(len(gpd.read_file(target)),1)
+
+    def test_balanced_union_preserves_holes_overlaps_and_disconnected_parts(self):
+        from app.input_packages import _CoverageUnion
+        from shapely.ops import unary_union
+        polygons=[box(i,0,i+1.25,1) for i in range(70)]+[box(100,0,101,1)]
+        polygons.append(box(10,10,15,15).difference(box(11,11,14,14)))
+        accumulator=_CoverageUnion()
+        for polygon in polygons:accumulator.add(polygon)
+        self.assertTrue(accumulator.geometry().equals(unary_union(polygons)))
+
+    def test_preflight_parses_each_period_once_and_validates_transform_once(self):
+        import user_pipeline
+        from pyproj import Transformer
+        files=[self.raster(f'{i}.tif') for i in range(3)]
+        area=self.root/'area.shp'
+        gpd.GeoDataFrame(geometry=[box(112,21.99968,112.00032,22)],crs=4490).to_file(area)
+        listing=self.root/'2021.txt';listing.write_text('\n'.join(map(str,files)),encoding='utf-8')
+        with patch.object(user_pipeline,'listed_rasters',wraps=user_pipeline.listed_rasters) as read:
+            report=user_pipeline.build_preflight_report('validation',{'area':{'2021':listing}},str(area),{},self.root,include_runtime_checks=False)
+            self.assertEqual(read.call_count,1)
+            self.assertEqual(report['image_count'],3)
+        with patch.object(Transformer,'from_crs',wraps=Transformer.from_crs) as convert:
+            user_pipeline.validate_validation_inputs([('2021',str(listing))],area,minimum_periods=1)
+            self.assertEqual(convert.call_count,1)
+
+    @unittest.skipUnless(sys.platform=='win32','Windows extended paths')
+    def test_long_artifact_paths_are_readable_and_relocatable(self):
+        import shutil
+        from app.project_relocation import _io_path, _relative_to
+        from engine.samroad.image_resume import relocate_task_image_markers
+        deep=_io_path(self.root/'long')/('a'*100)/('b'*100)/'inference/graph'
+        try:
+            deep.mkdir(parents=True)
+            file=deep/'v0001_fast_topology.npz'
+            self.assertGreater(len(str(file)),260)
+            np.savez_compressed(file,nodes=np.ones((3,2)))
+            self.assertEqual(np.load(file)['nodes'].shape,(3,2))
+            self.assertIsNotNone(_relative_to(file,self.root))
+            relocate_task_image_markers(_io_path(self.root))
+        finally:
+            shutil.rmtree(_io_path(self.root/'long'))
 
 
 if __name__ == '__main__':

@@ -66,10 +66,20 @@ def find_prepared(root, identity):
         if prepared_record(root, identity):
             return root  # rename succeeded, but writing complete.json was interrupted
         raise FileExistsError(f'IR-MAD incomplete or concurrent cache: {root}')
-    for candidate in sorted(root.parent.glob(root.name + '.pending-*')):
+    candidates = set(root.parent.glob(root.name + '.pending-*'))
+    candidates.update(root.parent.glob(root.name[:16] + '.pending-*'))
+    for candidate in sorted(candidates):
         if prepared_record(candidate, identity):
             return candidate
     return None
+
+
+def new_attempt(root):
+    """Short locator, full identity in prepared.json; reserve exclusively."""
+    root = Path(root)
+    attempt = root.with_name(f'{root.name[:16]}.pending-{uuid.uuid4().hex[:16]}')
+    attempt.mkdir(parents=True, exist_ok=False)
+    return attempt
 
 
 def seal_prepared(attempt, root, identity):

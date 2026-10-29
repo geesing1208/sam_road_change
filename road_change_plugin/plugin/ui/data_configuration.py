@@ -44,6 +44,9 @@ class DataConfiguration(ProjectPage):
         self.changed = changed
         self.imported = imported
         self.package_request = package_request
+        self.cancel_package_button = QPushButton('取消数据包操作')
+        self.cancel_package_button.hide()
+        self.layout().insertWidget(self.layout().count()-1, self.cancel_package_button)
         self._package_label = None
         self._loading = False
         self._model = dict(areas=[], periods=[], truths=[], area_irmad_references={})

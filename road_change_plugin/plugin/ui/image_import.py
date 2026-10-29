@@ -22,6 +22,8 @@ def dates(text):
 def identify(*levels):
     """First nonempty evidence wins; ambiguous evidence requires user correction."""
     for values in levels:
+        if any(not dates(match[0]) for value in values for match in DATE.finditer(value)):
+            return '', '日期无效，请填写期次名称'
         found = set().union(*(dates(value) for value in values))
         if found:
             return (next(iter(found)), '') if len(found) == 1 else ('', '检测到多个日期，请填写该期名称')

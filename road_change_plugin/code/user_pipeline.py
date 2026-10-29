@@ -37,6 +37,7 @@ from app.result_publisher import (
     ProjectLayout, ResultPublisher, shapefile_has_records,
 )
 from app.project_relocation import (
+    _io_path,
     active_old_path_references,
     build_relocation_plan,
     repair_task_batch_lists,
@@ -656,7 +657,7 @@ def _validate_truth_shapefile(path: Path) -> None:
         raise ValueError(f"变化真值必须是线或面：{path}（发现 {', '.join(invalid)}）")
 
 
-def _valid_raster_footprint(path: Path, target_crs=None):
+def _valid_raster_footprint(path: Path, target_crs=None, *, checked_transforms=None):
     """Return raster bounds after a minimal readability/CRS check.
 
     The legacy implementation scanned every GDAL block and polygonized all
@@ -676,7 +677,11 @@ def _valid_raster_footprint(path: Path, target_crs=None):
                 raise ValueError(f"影像缺少 CRS：{path}")
             if target_crs is not None:
                 try:
-                    Transformer.from_crs(dataset.crs, target_crs, always_xy=True)
+                    crs_pair = (dataset.crs.to_wkt(), str(target_crs))
+                    if checked_transforms is None or crs_pair not in checked_transforms:
+                        Transformer.from_crs(dataset.crs, target_crs, always_xy=True)
+                        if checked_transforms is not None:
+                            checked_transforms.add(crs_pair)
                 except ProjError as exc:
                     raise ValueError(
                         "无法建立影像到验证区的坐标转换。"
@@ -711,6 +716,7 @@ def validate_validation_inputs(period_entries, validation_area: str | Path, *, m
         raise ValueError(f"验证区必须使用 SHP 文件（.shp）：{area_path}")
     area = _read_validation_area(area_path)
     periods: dict[str, Path] = {}
+    checked_transforms = set()
     for entry in period_entries or []:
         if len(entry) != 2:
             raise ValueError("--period 必须重复使用为：--period 期次 影像文件或目录")
@@ -730,7 +736,7 @@ def validate_validation_inputs(period_entries, validation_area: str | Path, *, m
         raster_errors: list[str] = []
         for raster in rasters:
             try:
-                _valid_raster_footprint(raster, target_crs=area.crs)
+                _valid_raster_footprint(raster, target_crs=area.crs, checked_transforms=checked_transforms)
             except Exception as exc:
                 raster_errors.append(f"{raster}：{type(exc).__name__}: {exc}")
         if raster_errors:
@@ -2453,7 +2459,9 @@ def _write_probability_mosaic(
 
 def extract(args: argparse.Namespace) -> dict:
     started = time.monotonic()
-    workspace = Path(args.workspace).expanduser().resolve()
+    # Deep inference artifacts exceed MAX_PATH even when the project root is valid.
+    # GDAL, NumPy and Python all accept this native Windows I/O spelling.
+    workspace = _io_path(Path(args.workspace).expanduser().resolve())
     manifest_path = workspace / "input_manifest.json"
     if not manifest_path.is_file():
         if not str(args.source).strip():
@@ -4310,6 +4318,7 @@ def build_preflight_report(
                     resolutions.append((abs(dataset.res[0]), abs(dataset.res[1])))
                     all_metadata.append({
                         "grid": grid,
+                        "period": period,
                         "path": raster,
                         "crs": dataset.crs,
                         "width": dataset.width,
@@ -4342,7 +4351,7 @@ def build_preflight_report(
             for period in grids.get(area_id, {}):
                 footprints = []
                 for item in all_metadata:
-                    if item["grid"] != area_id or Path(item["path"]) not in listed_rasters(grids[area_id][period]):
+                    if item["grid"] != area_id or item["period"] != period:
                         continue
                     bounds = transform_bounds(item["crs"], area.crs, *item["bounds"], densify_pts=21)
                     footprints.append(box(*bounds))
@@ -5417,7 +5426,7 @@ def run_all(args: argparse.Namespace) -> dict:
         )
         _validate_resume_execution_profile(prior, execution_profile)
         batch_repair = repair_task_batch_lists(job_root)
-        marker_repair = relocate_task_image_markers(job_root)
+        marker_repair = relocate_task_image_markers(_io_path(job_root))
         if batch_repair.modified_lists:
             print(
                 f"[项目路径检查] 已自动修正 {batch_repair.modified_lists} 个影像清单，"

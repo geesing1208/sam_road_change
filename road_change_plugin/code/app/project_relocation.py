@@ -20,6 +20,13 @@ def _resolved(value: Path | str) -> Path:
 
 
 def _relative_to(path: Path, root: Path) -> Path | None:
+    # Extended Windows paths and display paths address the same project files.
+    def display(value):
+        text = str(value)
+        if text.startswith('\\\\?\\UNC\\'):
+            return '\\\\' + text[8:]
+        return text[4:] if text.startswith('\\\\?\\') else text
+    path, root = Path(display(path)), Path(display(root))
     try:
         common = os.path.commonpath((os.path.normcase(str(path)), os.path.normcase(str(root))))
     except ValueError:
